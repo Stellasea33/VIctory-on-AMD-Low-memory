@@ -411,7 +411,7 @@ fn neutral() -> Option<&'static ID3D12Resource> {
         .get_or_init(|| {
             let host = host()?;
             let device = &host.device;
-            let (from, data) = host.upload_buffer(256)?;
+            let (from, data) = host.shader_input_buffer(256)?;
             // SAFETY: the buffer's mapping; plain creation and recording,
             // waited for before what it names goes.
             unsafe {
@@ -1718,7 +1718,7 @@ impl HostHeap {
                 // The strides, then the views' title addresses
                 // (`victory_shader::emit::VIEW_ADDRESSES`).
                 let bytes = u64::from(victory_shader::emit::SLOT_STRIDES_BYTES);
-                let (buffer, data) = host.upload_buffer(bytes)?;
+                let (buffer, data) = host.shader_input_buffer(bytes)?;
                 // SAFETY: the buffer's whole mapping; a live buffer.
                 let gpu = unsafe {
                     std::ptr::write_bytes(data, 0, bytes as usize);

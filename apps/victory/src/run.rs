@@ -53,6 +53,10 @@ pub fn run(
 
     if execute {
         check_cpu_features()?;
+        // Before any title code runs (TLS callbacks, DllMain, entry point):
+        // the title writes a magic to absolute address 0, which Windows would
+        // fault on; the handler steps over those stores.
+        victory_loader::install_null_page_handler();
     }
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
@@ -80,7 +84,11 @@ pub fn run(
             .with_context(|| format!("loading the PC FSR upscaler from {}", dir.display()))?;
         // SAFETY: Windows supports setting the environment across threads.
         // No title code has run or queried DXGI yet.
-        unsafe { std::env::set_var("VICTORY_DISPLAY_MODE", "3840x2160") };
+        // The FSR 4K profile's stock frontend is 4K; VICTORY_OUTPUT overrides
+        // the display size reported to the title (e.g. 2560x1440 for a 2K
+        // set), so it renders a lower resolution and FSR upscales to it.
+        let display = std::env::var("VICTORY_OUTPUT").unwrap_or_else(|_| "3840x2160".to_string());
+        unsafe { std::env::set_var("VICTORY_DISPLAY_MODE", &display) };
         let cache = cfg.cache_subdir(&format!("images/fsr-{}-4k-sdr", preset.name()))?;
         victory_loader::load(&prepared, &cache)?
     } else {

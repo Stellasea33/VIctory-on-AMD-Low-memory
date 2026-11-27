@@ -21,6 +21,9 @@ clap.workspace = true
 walkdir.workspace = true
 tracing.workspace = true
 
+[build-dependencies]
+zlib-rs.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

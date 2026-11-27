@@ -57,6 +57,12 @@ pub(crate) struct Host {
     /// The adapter the device is on, for its memory budget
     /// ([`Host::video_memory`]); `None` if the system does not name it.
     adapter: Option<IDXGIAdapter3>,
+    /// With `VICTORY_LOCAL_GPU_INPUTS=1` and a resizable-BAR card whose
+    /// dedicated memory the system reports: CPU-written, GPU-read input
+    /// buffers go into local video memory while its budget allows
+    /// ([`Host::shader_input_buffer`]), sparing host RAM on small-memory
+    /// PCs. Ported from DexNom/VIctory.
+    local_gpu_inputs: Option<Mutex<()>>,
     /// Shader-visible heaps of one slot, bound where a list sets no view or
     /// no sampler heap ([`fallback_heaps`]).
     fallback_view: OnceLock<Option<ID3D12DescriptorHeap>>,
@@ -1080,6 +1086,27 @@ fn create() -> windows::core::Result<Host> {
         let adapter = CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
             .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
             .ok();
+        let local_gpu_inputs = if std::env::var_os("VICTORY_LOCAL_GPU_INPUTS").is_some_and(|v| v == "1") {
+            let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS16::default();
+            let supported = device
+                .CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS16,
+                    (&raw mut options).cast(),
+                    size_of_val(&options) as u32,
+                )
+                .is_ok()
+                && options.GPUUploadHeapSupported.as_bool();
+            let local = adapter.is_some()
+                && supported
+                && device
+                    .GetCustomHeapProperties(0, D3D12_HEAP_TYPE_GPU_UPLOAD)
+                    .MemoryPoolPreference
+                    == D3D12_MEMORY_POOL_L1;
+            tracing::info!(supported, local, "CPU-written GPU input buffers requested in local video memory");
+            local.then(Mutex::default)
+        } else {
+            None
+        };
         if let Some(desc) = adapter.as_ref().and_then(|a| a.GetDesc1().ok()) {
             let name = String::from_utf16_lossy(&desc.Description);
             tracing::info!(
@@ -1118,6 +1145,7 @@ fn create() -> windows::core::Result<Host> {
             next_rtv: AtomicU32::new(0),
             presenter: Mutex::new(None),
             adapter,
+            local_gpu_inputs,
             fallback_view: OnceLock::new(),
             fallback_sampler: OnceLock::new(),
         })
@@ -2086,7 +2114,7 @@ fn take_chunk(host: &Host, size: u64) -> Option<Chunk> {
         ALIVE[5].fetch_add(1, Ordering::Relaxed);
         return Some(chunk);
     }
-    let (buffer, data) = host.upload_buffer(size)?;
+    let (buffer, data) = host.shader_input_buffer(size)?;
     name(&buffer, || "list scratch".into());
     ALIVE[1].fetch_add(1, Ordering::Relaxed);
     ALIVE[2].fetch_add(size, Ordering::Relaxed);
@@ -7301,7 +7329,7 @@ impl HostList {
         let mut s = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
         let len = len.max(1).next_multiple_of(256);
         if len > SCRATCH_CHUNK {
-            let (buffer, data) = host.upload_buffer(len)?;
+            let (buffer, data) = host.shader_input_buffer(len)?;
             name(&buffer, || format!("list scratch {len:#x}"));
             self.deferred().hold_upload(buffer.clone(), len);
             return Some((buffer, 0, data));
@@ -9137,6 +9165,31 @@ impl Host {
         }
     }
 
+    /// A CPU-written, GPU-read input buffer: in local video memory (a
+    /// resizable BAR's `GPU_UPLOAD` heap) while its budget allows, else in
+    /// host upload memory ([`Self::upload_buffer`]). Shaders read it but the
+    /// CPU does not read it back, so the card's own memory is the right home
+    /// and spares host RAM on small-memory PCs. `VICTORY_LOCAL_GPU_INPUTS=1`
+    /// turns the card-side placement on. Ported from DexNom/VIctory.
+    pub(crate) fn shader_input_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
+        if size <= 64 << 20
+            && let (Some(gate), Some(adapter)) = (&self.local_gpu_inputs, &self.adapter)
+        {
+            let _guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+            let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            // SAFETY: query node zero into a local output structure.
+            if unsafe { adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }.is_ok()
+                && info.Budget.saturating_sub(info.CurrentUsage)
+                    >= size.max(1).next_multiple_of(64 << 10).saturating_add(info.Budget / 8)
+            {
+                if let Some(mapped) = self.mapped_card_buffer(size, false) {
+                    return Some(mapped);
+                }
+            }
+        }
+        self.upload_buffer(size)
+    }
+
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
@@ -9157,37 +9210,50 @@ impl Host {
             Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             ..Default::default()
         };
-        let mut buffer: Option<ID3D12Resource> = None;
-        let mut data = std::ptr::null_mut();
-        // SAFETY: plain creation and mapping of an upload buffer.
-        let made = unsafe {
-            self.device
-                .CreateCommittedResource(
-                    &heap,
-                    not_resident(),
-                    &desc,
-                    D3D12_RESOURCE_STATE_GENERIC_READ,
-                    None,
-                    &mut buffer,
-                )
-                .and_then(|()| {
-                    let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    resident(&self.device, b)?;
-                    b.Map(0, None, Some(&mut data))
-                })
-        };
-        #[cfg(feature = "diagnostics")]
-        if made.is_ok()
-            && let Some(b) = &buffer
-        {
-            crate::book::made(b, || "an upload buffer".into());
-        }
-        match made {
-            Ok(()) => Some((buffer?, data.cast())),
-            Err(e) => {
-                crate::residency::allocation_error(&e);
-                tracing::warn!(error = %e, size, "no upload buffer");
-                None
+        // On E_OUTOFMEMORY free the spare chunks and retry a few times before
+        // giving up: the residency sweep (VICTORY_RESIDENCY=1) also lets idle
+        // scratch/staging go about once a second, and handing the title a null
+        // pointer here faults it writing the buffer (0xc0000005).
+        let mut attempts = 0u32;
+        loop {
+            let mut buffer: Option<ID3D12Resource> = None;
+            let mut data = std::ptr::null_mut();
+            // SAFETY: plain creation and mapping of an upload buffer.
+            let made = unsafe {
+                self.device
+                    .CreateCommittedResource(
+                        &heap,
+                        not_resident(),
+                        &desc,
+                        D3D12_RESOURCE_STATE_GENERIC_READ,
+                        None,
+                        &mut buffer,
+                    )
+                    .and_then(|()| {
+                        let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
+                        resident(&self.device, b)?;
+                        b.Map(0, None, Some(&mut data))
+                    })
+            };
+            match made {
+                Ok(()) => {
+                    #[cfg(feature = "diagnostics")]
+                    if let Some(b) = &buffer {
+                        crate::book::made(b, || "an upload buffer".into());
+                    }
+                    return Some((buffer?, data.cast()));
+                }
+                Err(e) => {
+                    crate::residency::allocation_error(&e);
+                    attempts += 1;
+                    if e.code() == windows::Win32::Foundation::E_OUTOFMEMORY && attempts < 5 {
+                        trim_spare_chunks();
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
+                    tracing::warn!(error = %e, size, "no upload buffer");
+                    return None;
+                }
             }
         }
     }
@@ -10137,37 +10203,49 @@ impl Host {
             Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
             ..Default::default()
         };
-        let mut buffer: Option<ID3D12Resource> = None;
-        let mut data = std::ptr::null_mut();
-        // SAFETY: plain creation and mapping of a CPU-visible buffer.
-        let made = unsafe {
-            self.device
-                .CreateCommittedResource(
-                    &heap,
-                    not_resident(),
-                    &desc,
-                    D3D12_RESOURCE_STATE_COMMON,
-                    None,
-                    &mut buffer,
-                )
-                .and_then(|()| {
-                    let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
-                    resident(&self.device, b)?;
-                    mapped(&self.device)?;
-                    b.Map(0, None, Some(&mut data))
-                })
-        };
-        #[cfg(feature = "diagnostics")]
-        if made.is_ok()
-            && let Some(b) = &buffer
-        {
-            crate::book::made(b, || "a shared buffer".into());
-        }
-        match made {
-            Ok(()) => Some((buffer?, data.cast())),
-            Err(e) => {
-                tracing::warn!(error = %e, size, "no shared buffer");
-                None
+        // On E_OUTOFMEMORY free the spare chunks and retry a few times before
+        // giving up (see `upload_buffer`): a null pointer here faults the title.
+        let mut attempts = 0u32;
+        loop {
+            let mut buffer: Option<ID3D12Resource> = None;
+            let mut data = std::ptr::null_mut();
+            // SAFETY: plain creation and mapping of a CPU-visible buffer.
+            let made = unsafe {
+                self.device
+                    .CreateCommittedResource(
+                        &heap,
+                        not_resident(),
+                        &desc,
+                        D3D12_RESOURCE_STATE_COMMON,
+                        None,
+                        &mut buffer,
+                    )
+                    .and_then(|()| {
+                        let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
+                        resident(&self.device, b)?;
+                        mapped(&self.device)?;
+                        b.Map(0, None, Some(&mut data))
+                    })
+            };
+            match made {
+                Ok(()) => {
+                    #[cfg(feature = "diagnostics")]
+                    if let Some(b) = &buffer {
+                        crate::book::made(b, || "a shared buffer".into());
+                    }
+                    return Some((buffer?, data.cast()));
+                }
+                Err(e) => {
+                    crate::residency::allocation_error(&e);
+                    attempts += 1;
+                    if e.code() == windows::Win32::Foundation::E_OUTOFMEMORY && attempts < 5 {
+                        trim_spare_chunks();
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        continue;
+                    }
+                    tracing::warn!(error = %e, size, "no shared buffer");
+                    return None;
+                }
             }
         }
     }

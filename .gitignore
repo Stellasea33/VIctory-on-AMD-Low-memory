@@ -28,6 +28,9 @@
 # Executables, libraries, symbols
 *.exe
 *.dll
+# The FSR upscaler ships compressed (`.dll.z`, rebuilt to `.dll` by
+# apps/victory/build.rs at build time); the tiny loader ships as-is.
+!fidelityfx/amd_fidelityfx_loader_dx12.dll
 *.pdb
 *.lib
 *.sys
@@ -69,6 +72,10 @@
 *.zip
 *.7z
 *.rar
+
+# Run logs and screenshots (local debugging only)
+*.log
+shot_*.png
 
 # Editor / OS noise
 .vs/
