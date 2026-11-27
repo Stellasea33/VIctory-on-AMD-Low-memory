@@ -1,4 +1,4 @@
-# VIctory-Belobug-AMD (Optimized)
+# VIctory-on-AMD-Low-memory
 
 A compatibility layer (VIctory) that runs the Xbox Series build of GTA 6 natively on Windows, with some optimizations for AMD GPUs and low-RAM (16 GB) machines.
 
