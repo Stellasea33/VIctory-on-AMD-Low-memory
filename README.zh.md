@@ -1,4 +1,4 @@
-# VIctory-Belobug-AMD 优化版
+# AMD显卡上的VIctory低内存优化
 
 在 Windows 上原生运行 Xbox Series 版 GTA6 的兼容层（VIctory），针对 AMD 显卡与低内存（16 GB）机器做了一些优化。
 
