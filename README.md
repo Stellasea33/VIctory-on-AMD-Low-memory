@@ -80,7 +80,7 @@ All modes run in PowerShell and automatically enable the memory optimizations (r
 ### Mode 2: 2K output (2560×1440) — balance of quality and frame rate
 
 ```powershell
-.\scripts\play-lowmem.ps1 -Exe "D:\GTA6\game_scarlett_master.exe" -ConsoleProfile series-x -More @{VICTORY_FSR_4K='balanced'; VICTORY_OUTPUT='2560x1440'}
+.\scripts\play-lowmem.ps1 -Exe "D:\GTA6\game_scarlett_master.exe" -ConsoleProfile series-x -More @{VICTORY_FSR_4K='quality'; VICTORY_OUTPUT='2560x1440'}
 ```
 
 If you want to try 4K, change 2560x1440 to 3840x2160 instead.
