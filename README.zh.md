@@ -80,7 +80,7 @@ fidelityfx_dir = 'fidelityfx'                               # PC FSR DLL 目录�
 ### 方式二：2K 输出（2560×1440）—— 画面与帧率平衡
 
 ```powershell
-.\scripts\play-lowmem.ps1 -Exe "D:\GTA6\game_scarlett_master.exe" -ConsoleProfile series-x -More @{VICTORY_FSR_4K='balanced'; VICTORY_OUTPUT='2560x1440'}
+.\scripts\play-lowmem.ps1 -Exe "D:\GTA6\game_scarlett_master.exe" -ConsoleProfile series-x -More @{VICTORY_FSR_4K='quality'; VICTORY_OUTPUT='2560x1440'}
 ```
 如果想尝试4k也可以改为3840x2160
 
